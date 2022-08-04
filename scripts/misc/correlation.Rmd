@@ -1,0 +1,675 @@
+---
+title: "cpg_mir_corr"
+author: "Barry"
+date: "5/13/2022"
+output: html_document
+---
+
+# make sure you have same patients in all inputs
+
+```{R}
+mir_meta = read.table("/data/TCGA-PRAD/mirna_matched/mirna_meta.txt", sep="\t", header=T)
+mrna_meta = read.table("/data/TCGA-PRAD/mrna_matched/mrna_meta.txt", sep="\t", header=T)
+met_meta = read.table("/data/TCGA-PRAD/methylation_matched/methylation_meta.txt", sep="\t", header=T)
+
+gene = mrna_meta$Sample.ID
+mirna = mir_meta$Sample.ID
+cpg = met_meta$Sample_ID
+
+setdiff(gene,mirna) # no diff so its cpg we need to pop
+
+met_meta <- subset(met_meta, met_meta$Sample_ID %in% gene)
+mrna_meta = subset(mrna_meta, mrna_meta$Sample.ID %in% met_meta$Sample_ID)
+mir_meta = subset(mir_meta, mir_meta$Sample.ID %in% met_meta$Sample_ID)
+
+sub_cpg = met_meta$Sample_ID
+sub_gene = mrna_meta$Sample.ID
+sub_mir = mir_meta$Sample.ID
+rm( cpg, gene, mirna )
+
+```
+
+# remove law var function
+Take the top 10k features ranked by variance - applicable to CpG and mRNA mats.
+colvars - we want this to be applied to features, remove low variance across samples. 
+```{R}
+
+remove_var <- function(mat, nfeat){
+  require(resample)
+  mat <- as.matrix(t(mat))
+  vars <- colVars(mat)
+  varorder <- order(vars, decreasing=T)
+  keep <- head(varorder, max(1, nfeat))
+  mat <- as.matrix(mat[,keep,drop=FALSE])
+  mat <- as.matrix(t(mat))
+  return(mat)
+}
+
+```
+
+# methylation
+
+```{R}
+mVals = read.table("/data/TCGA-PRAD/methylation_matched/mVals.txt", sep="\t", header=T)
+colnames(mVals) = gsub("\\.", "-", colnames(mVals))
+mVals <- as.matrix(mVals[,sub_mir])
+
+#var.probes = apply(mVals, 1, var) # X is of size number of samples x number of probes
+#hist(var.probes)
+
+mVals = remove_var(mVals, 5000)
+var.probes = apply(mVals, 1, var)
+hist(var.probes)
+```
+
+# methylation subset time 
+I want to subset probes that are annotated by mirnas 
+```{R}
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ann450k_ranges <- makeGRangesFromDataFrame(ann450k[,1:4],
+                              keep.extra.columns=T,
+                              ignore.strand=FALSE,
+                              seqinfo=NULL,
+                              seqnames.field=c("seqnames", "seqname",
+                                               "chromosome", "chrom",
+                                               "chr", "chromosome_name",
+                                               "seqid"),
+                              start.field="pos",
+                              end.field="pos",
+                              strand.field="strand",
+                              starts.in.df.are.0based=FALSE)
+chain=rtracklayer::import.chain("/data/TCGA-PRAD/methylation_meta/hg19ToHg38.over.chain")
+hg38loc <- rtracklayer::liftOver(ann450k_ranges,chain)
+hg38locDF <- data.frame(hg38loc)
+rownames(hg38locDF) <- hg38locDF$group_name
+pos38<-start(unlist(hg38loc))
+ann450k_ranges=data.frame(ann450k,"pos.hg19"=ann450k$pos)
+ann450k_ranges$pos=rep(NA,dim(ann450k_ranges)[1])
+ann450k_ranges[hg38locDF$Name, "pos"]=hg38locDF[,"start"]
+
+ann450kSub <- ann450k_ranges[match(rownames(mVals),ann450k_ranges$Name),
+                      c(1:4,12:19,24:ncol(ann450k_ranges))]
+
+
+mir_probes <- ann450kSub[grep("MIR[0-9]+$", ann450kSub$UCSC_RefGene_Name),]
+cpg_mirs <- rownames(mir_probes)
+mir_ids <- unique(unlist(mir_probes$UCSC_RefGene_Name))
+mir_ids = unlist(strsplit(mir_ids, ";", ""))
+mir_ids <- unique(mir_ids[grep("MIR[0-9]+$", mir_ids)])
+
+# convert the feckers to hsa-miR
+library(biomaRt)
+hsa_mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+x <- getBM(attributes = c("mirbase_accession", "mirbase_id", "ensembl_gene_id", "entrezgene_accession"),mart = hsa_mart)
+x <-  x[!(is.na(x$mirbase_accession) | x$mirbase_accession==""), ]
+
+# match overlapping cpg - miR probes MIR - hsa-miR - this check sout with bedtools probes / mirs.bed olap (237) ouch 1 off is good enough for me! 
+x = subset(x, x$entrezgene_accession %in% mir_ids)
+sub_mir_mat = unique(x$mirbase_id)
+```
+
+
+# subset the mVals
+```{R}
+mVals <- mVals[cpg_mirs, ]
+dim(mVals)
+
+```
+
+
+# genes
+```{R}
+genes = read.table("/data/TCGA-PRAD/mrna_matched/mrna_vst.txt", sep="\t", header=T)
+colnames(genes) = gsub("\\.", "-", colnames(genes))
+genes = genes[,sub_mir]
+
+var.genes = apply(genes, 1, var)
+hist(var.genes)
+
+rv <- matrixStats::rowVars(as.matrix(genes))
+rv2 <- data.frame(Seq = seq(1:nrow(genes)), rowVars = rv[order(rv, decreasing = TRUE)])
+theme_set(theme_bw(base_size = 10))
+ggplot(rv2, aes(x=Seq,y=rowVars)) + geom_line() + scale_y_log10() +
+  ggtitle("vst-transformed counts ordered by rowVar")
+
+
+genes = remove_var(genes, 4000)
+dim(genes)
+
+# gene names
+anno = read.table("/data/TCGA-PRAD/mrna/0007888f-8d96-4c01-8251-7fef6cc71596/88215dd0-5841-44f1-9393-eefd8238cbb3.rna_seq.augmented_star_gene_counts.tsv", header=T, sep="\t")
+anno = subset(anno, anno$gene_type == "protein_coding")
+anno <- anno[,c(1,2)]
+anno <- anno[match(rownames(genes), anno$gene_id),]
+rownames(genes) = anno$gene_name
+genes = as.matrix(genes)
+
+var.genes = apply(genes, 1, var)
+hist(var.genes)
+```
+
+# mirna
+```{R}
+# rework the remove var to remove 20% based on variance. 
+
+remove_var <- function(mat, var){
+  require(resample)
+  mat <- as.matrix(t(mat))
+  vars <- colVars(mat)
+  varorder <- order(vars, decreasing=T)
+  keep <- head(varorder, max(1, ncol(mat)*(1-var)))
+  mat <- as.matrix(mat[,keep,drop=FALSE])
+  mat <- as.matrix(t(mat))
+  return(mat)
+}
+```
+
+```{R}
+mirna = read.table("/data/TCGA-PRAD/mirna_matched/mirna_vst.txt", sep="\t", header=T)
+colnames(mirna) = gsub("\\.", "-", colnames(mirna))
+mirna = as.matrix(mirna[,sub_mir])
+
+
+mirna <- mirna[sub_mir_mat,]
+
+```
+
+# dont run
+```{R}
+var.mirna = apply(mirna, 1, var)
+hist(var.mirna)
+
+rv <- matrixStats::rowVars(as.matrix(mirna))
+rv2 <- data.frame(Seq = seq(1:nrow(mirna)), rowVars = rv[order(rv, decreasing = TRUE)])
+theme_set(theme_bw(base_size = 10))
+ggplot(rv2, aes(x=Seq,y=rowVars)) + geom_line() + scale_y_log10() +
+  ggtitle("vst-transformed counts ordered by rowVar")
+
+mirna = remove_var(mirna, 100)
+dim(mirna)
+
+var.mirna = apply(mirna, 1, var)
+hist(var.mirna)
+```
+
+
+
+```{R}
+library(mixOmics)
+
+# CCA test
+
+X <- t(mVals) # IDS on rows features as cols
+Y <- t(mirna)
+
+all(rownames(X)==rownames(Y))
+
+result.rcca.nutrimouse <- rcc(X, Y, method = 'ridge', lambda1 = 0.5,
+lambda2 = 0.05)
+
+imgCor(X, Y, sideColors = c('orange', 'gray'), interactive.dev = T)
+```
+
+
+
+
+```{R}
+
+mVals = as.data.frame(t(mVals))
+genes = as.data.frame(t(genes))
+mirna = as.data.frame(t(mirna))
+
+
+# make sure the rownames match mir_meta, or whichever meta you choose to use.
+mir_meta = mir_meta[match(sub_mir, rownames(mir_meta)),]
+
+
+CpG = as.matrix(mVals[,1:5000])
+mRNA = as.matrix(genes[,1:4000])
+miRNA = as.matrix(mirna[,1:100])
+```
+
+
+```{R}
+# must be in format double[i x j] not data.frame[]
+X = list(mRNA = mRNA,
+         miRNA = miRNA,
+         CpG = CpG)
+Y = factor(mir_meta$Sample.Type)
+```
+
+# Pairwise PLS comparisons
+```{R}
+list.keepX = c(50,50)
+list.keepY = c(50,50)
+
+# generate pairwise PLS models
+pls1 <- spls(X[["CpG"]], X[["miRNA"]], keepX = list.keepX, keepY = list.keepY)
+pls2 <- spls(X[["miRNA"]], X[["mRNA"]], keepX = list.keepX, keepY = list.keepY)
+pls3 <- spls(X[["CpG"]], X[["mRNA"]], keepX = list.keepX, keepY = list.keepY)
+```
+
+```{R}
+# plot features of first PLS
+plotVar(pls1, cutoff = 0.5, title = "(a) CpG vs miRNA", 
+        legend = c("CpG", "miRNA"), 
+        var.names = FALSE, style = 'graphics', 
+        pch = c(16, 17), cex = c(2,2), 
+        col = c('darkorchid', 'lightgreen'))
+```
+
+```{R}
+# plot features of second PLS
+plotVar(pls2, cutoff = 0.5, title = "(b) miRNA vs mRNA", 
+        legend = c("miRNA", "mRNA"), 
+        var.names = FALSE, style = 'graphics', 
+        pch = c(16, 17), cex = c(2,2), 
+        col = c('darkorchid', 'lightgreen'))
+```
+
+```{R}
+# plot features of third PLS
+plotVar(pls3, cutoff = 0.5, title = "(c) CpG vs mRNA", 
+        legend = c("CpG", "mRNA"), 
+        var.names = FALSE, style = 'graphics', 
+        pch = c(16, 17), cex = c(2,2), 
+        col = c('darkorchid', 'lightgreen'))
+```
+
+```{R}
+# correlation of PC1 in each dataset
+cor(pls1$variates$X, pls1$variates$Y)
+cor(pls2$variates$X, pls2$variates$Y)
+cor(pls3$variates$X, pls3$variates$Y)
+```
+
+# design matrix (?)
+
+```{R}
+# for square matrix filled with 0.1s
+design = matrix(1, ncol = length(X), nrow = length(X), 
+                dimnames = list(names(X), names(X)))
+diag(design) = 0 
+design
+```
+
+# diablo
+
+```{R}
+basic = block.splsda(X=X, Y=Y)
+plotIndiv(basic)
+plotDiablo(basic, ncomp=1)
+circosPlot(basic, cutoff=0.7)
+
+X11()
+cimDiablo(basic, color.blocks = c('darkorchid', 'lightgreen', "purple"), comp = 1, margin=c(8,20), legend.position = "right")
+while(names(dev.cur()) !='null device') Sys.sleep(1)
+
+```
+
+# tune n comps
+```{R}
+# run component number tuning with repeated CV
+perf.diablo = perf(basic, validation = 'Mfold', 
+                   folds = 10, nrepeat = 10) 
+
+plot(perf.diablo)
+```
+
+```{R}
+# set the optimal ncomp value
+ncomp = perf.diablo$choice.ncomp$WeightedVote["Overall.BER", "centroids.dist"] 
+# show the optimal choice for ncomp for each dist metric
+perf.diablo$choice.ncomp$WeightedVote 
+```
+
+```{R}
+test.keepX = list (CpG = c(5:9, seq(10, 18, 2), seq(20,30,5)), 
+                   miRNA = c(5:9, seq(10, 18, 2), seq(20,30,5)),
+                   mRNA = c(5:9, seq(10, 18, 2), seq(20,30,5)))
+
+
+BPPARAM <- BiocParallel::MulticoreParam(workers = parallel::detectCores()-1)
+tune = tune.block.splsda(X=X, Y=Y, ncomp = 2, test.keepX = test.keepX, design=design, validation = 'Mfold', folds = 10, nrepeat = 1, dist = "mahalanobis.dist", BPPARAM = BPPARAM)
+
+```
+
+```{R}
+library(DESeq2)
+load("/data/TCGA-PRAD/mirna_meta/mirna.RData")
+mirna_counts <- mirna_counts[ , -which(names(mirna_counts) %in% c("TCGA-V1-A9O5-06A"))]
+mirna_meta <- mirna_meta[!(mirna_meta$Sample.ID == "TCGA-V1-A9O5-06A"),]
+mirna_meta$Sample.Type <- ifelse(mirna_meta$Sample.Type == "Solid Tissue Normal", "Normal", mirna_meta$Sample.Type)
+mirna_meta$Sample.Type <- ifelse(mirna_meta$Sample.Type == "Primary Tumor", "Tumor", mirna_meta$Sample.Type)
+de_mirs <- read.table("/data/TCGA-PRAD/mirna_res/de_mirs.txt", header=T, sep="\t")
+
+# normalize using deseq2 - more robust than 'scale'
+dds <- DESeqDataSetFromMatrix(mirna_counts, mirna_meta, design = ~ Sample.Type)
+dds$condition <- relevel(dds$Sample.Type, ref = "Normal")
+dds <- DESeq(dds)
+mirna_vst <- varianceStabilizingTransformation(counts(dds), blind = F)
+write.table(mirna_vst, "/data/TCGA-PRAD/mimQTLs/mirna_vst.txt", sep="\t", row.names=T, quote=F)
+mirna_counts <- as.matrix(mirna_vst[de_mirs$mirbase_id, ])
+
+#mirna_counts <- scale(mirna_counts, center = T)
+```
+
+
+```{R, message=F}
+load("/data/TCGA-PRAD/methylation_meta/mSetSq_filt.RData")
+rm(bVals, mSetSeq_flt)
+
+samps <- intersect(colnames(mirna_counts), colnames(mVals))
+
+mVals <- mVals[,samps]
+mirna_counts <- mirna_counts[,samps]
+all(colnames(mVals)==colnames(mirna_counts))
+
+dem <- read.table("/data/TCGA-PRAD/methylation_res/dmp_filt.txt", header=T, sep="\t")
+keep <- rownames(dem)
+mVals <- mVals[keep,]
+dim(mVals)
+dim(mirna_counts)
+```
+
+# subset to contain overlapping hits.
+
+```{R}
+olap <- read.table("/data/TCGA-PRAD/bedtools/de-probes_olap_de-mirs.bed", header=F, sep="\t")
+probes <- olap$V4
+mirs <- olap$V9
+
+mirna_counts <- mirna_counts[mirs,]
+mVals <- mVals[probes,]
+```
+
+
+# correlation stats
+```{R, message=F, warning=F}
+mirna = read.table("/data/TCGA-PRAD/pray4me/mirna.txt", header=T, sep="\t", row.names = 1)
+colnames(mirna) = gsub("\\.", "-", colnames(mirna))
+mirna_counts = as.matrix(t(mirna))
+
+mVals = read.table("/data/TCGA-PRAD/pray4me/mVals.txt", header=T, sep="\t", row.names=1)
+mVals = as.matrix(t(mVals))
+
+tab = matrix(data=NA, nrow=nrow(mVals), ncol = nrow(mirna_counts))
+pvaltab = matrix(data=NA, nrow=nrow(mVals), ncol = nrow(mirna_counts))
+
+# ~2 minutes run-time with present data set on a 2016 laptop
+# expect warnings for exact p-values and ties
+for (i in 1:nrow(mVals)){
+  for (j in 1:nrow(mirna_counts)) {
+    testres = cor.test(mVals[i, ], mirna_counts[j, ], method="spearman")
+    tab[i,j] = testres$estimate
+    pvaltab[i,j] = testres$p.value
+  }
+}
+
+rownames(tab) = rownames(mVals)
+colnames(tab) = rownames(mirna_counts)
+rownames(pvaltab) = rownames(mVals)
+colnames(pvaltab) = rownames(mirna_counts)
+```
+
+###############################################################################
+## keep significant correlations after Bonferroni correction
+###############################################################################
+
+```{R}
+par(mfrow=c(1,1))
+
+# expect non-uniform distribution
+hist(pvaltab, xlab = "correlation p-values")
+
+keep = pvaltab < 0.05/(nrow(pvaltab)*ncol(pvaltab))
+table(keep)
+
+pvaltab = pvaltab[ , colSums(is.na(pvaltab)) < nrow(pvaltab)]
+tab = tab[ , colSums(is.na(tab)) < nrow(tab)]
+
+
+
+sig.tab = c()
+for (i in 1:nrow(pvaltab)) {
+  for (j in 1:ncol(pvaltab)) {
+    if (pvaltab[i,j] < 0.05/(nrow(pvaltab)*ncol(pvaltab))) {
+      sig.tab = append(sig.tab,
+             list(data.frame(
+                CpG=rownames(pvaltab)[i],
+                miRNA=colnames(pvaltab)[j],
+                Spearman_pval=pvaltab[i,j],
+                Spearman_cor=tab[i,j])))
+    }
+  }
+}
+
+sig.tab <- do.call(rbind, sig.tab)
+head(sig.tab)
+dim(sig.tab)
+```
+
+###############################################################################
+## making a matrix of significant p-values with pos or neg correlation indicated
+###############################################################################
+
+```{R}
+# make a matrix object out of input data, e.g. all significant CpGs in rows and
+# all significant miRNAs in columns
+library(reshape2)
+d = reshape2::dcast(sig.tab, CpG ~ miRNA, value.var = "Spearman_cor")
+m = as.matrix(d[,-1])
+rownames(m) = d[,1]
+
+# convert to a -1/0/1 matrix
+m[m>0] =  1
+m[m<0] = -1
+m[is.na(m)] = 0
+```
+
+
+###############################################################################
+## Clustering with pheatmap
+###############################################################################
+
+```{R, fig.height=7, fig.width=6}
+mycolors = colorRampPalette(c("dodgerblue3","white", "firebrick1"))(n=299)
+
+# Correlation distance and average linkage
+pheatmap::pheatmap(m, clustering_distance_rows = "correlation",
+         clustering_distance_cols = "correlation",
+         clustering_method = "average",
+         cutree_rows=5, cutree_cols=5, # decide number of clusters
+         annotation_colors = annotations_colors,
+         col = hcl.colors(50, "Viridis",rev=T),
+         show_rownames=TRUE,
+         show_colnames=TRUE)
+```
+
+###############################################################################
+# attempt to pull out 1-1 maps from bedtool result
+###############################################################################
+
+```{R}
+map <- data.frame(olap$V4, olap$V9)
+map$key <- paste(map$olap.V4, map$olap.V9, sep=":")
+
+sig.tab$key <- paste(sig.tab$CpG, sig.tab$miRNA, sep=":")
+
+sig.tab <- subset(sig.tab, sig.tab$key %in% map$key)
+```
+
+```{R}
+#d = reshape2::dcast(sig.tab, CpG ~ miRNA, value.var = "Spearman_cor")
+# not sure that does what its supposed to.
+
+tab <- subset(tab, colnames(tab) %in% sig.tab$miRNA)
+tab <- subset(tab, rownames(tab) %in% sig.tab$CpG)
+
+keep <- !duplicated(colnames(tab))
+tab <- tab[,keep]
+keep <- !duplicated(rownames(tab))
+tab <- tab[keep,]
+
+# convert to a -1/0/1 matrix
+#tab[tab>0] =  1
+#tab[tab<0] = -1
+#tab[is.na(tab)] = 0
+```
+
+
+###############################################################################
+## Clustering with pheatmap
+###############################################################################
+
+```{R, fig.height=5, fig.width=8}
+# load straight from lugh
+tab <- as.matrix(read.table("/data/TCGA-PRAD/mimQTLs/lugh/tab.txt", header=T, sep="\t"))
+dim(tab)
+colnames(tab) <- gsub("\\.", "-", colnames(tab))
+de_mirs <- read.table("/data/TCGA-PRAD/mirna_res/de_mirs.txt", header=T, sep="\t")
+keep <- !duplicated(de_mirs$mirbase_id)
+de_mirs <- de_mirs[keep,]
+dem <- read.table("/data/TCGA-PRAD/methylation_res/dmp_filt.txt", header=T, sep="\t")
+```
+
+
+```{R}
+## add annotations you idiot xxx
+#- these are incorrectly aligned. The de mirs are not correctly annotated.
+# annot_col seems to be slapped on to miRs without any preservation
+col_anno <- subset(de_mirs, de_mirs$mirbase_id %in% colnames(tab))
+col_anno$direction <- ifelse(col_anno$log2FoldChange > 0, "Up", "Down")
+col_anno <- col_anno[!duplicated(col_anno$mirbase_id),]
+annot_col <- data.frame(row.names = col_anno$mirbase_id, Direction = factor(col_anno$direction))
+
+cols <- c("red", "blue")
+names(cols) <- c("Up", "Down")
+annot_colors <- list(Direction = cols)
+
+
+row_anno <- subset(dem, dem$Name %in% rownames(tab))
+row_anno$direction <- ifelse(row_anno$logFC > 0, "Up", "Down")
+annot_row <- data.frame(row.names = row_anno$Name, Direction = factor(row_anno$direction))
+
+mycolors = colorRampPalette(c("blue4","white", "red4"))(n=299)
+
+load("/data/TCGA-PRAD/mimQTLs/lugh/hclust_col.RData")
+load("/data/TCGA-PRAD/mimQTLs/lugh/hclust_row.RData")
+
+# Correlation distance and average linkage
+pdf("continuous_scale_row_spearman_heatmap.pdf", width = 8, height = 10)
+pheatmap::pheatmap(tab, clustering_distance_rows = "correlation", 
+                   clustering_distance_cols = "correlation",
+                   clustering_method = "average",
+                   #annotation_colors = annot_colors,
+                   #annotation_row = annot_row,
+                  # annotation_col = annot_col,
+                   scale = "row",
+                   col = hcl.colors(200, "Purple-Green",rev=F),
+                   show_rownames=T,
+                   show_colnames=T)
+dev.off()
+```
+## cop on re clusters
+
+```{R}
+test = matrix(rnorm(200), 20, 10)
+test[1:10, seq(1, 10, 2)] = test[1:10, seq(1, 10, 2)] + 3
+test[11:20, seq(2, 10, 2)] = test[11:20, seq(2, 10, 2)] + 2
+test[15:20, seq(2, 10, 2)] = test[15:20, seq(2, 10, 2)] + 4
+colnames(test) = paste("Test", 1:10, sep = "")
+rownames(test) = paste("Gene", 1:20, sep = "")
+test<-as.data.frame(test)
+
+dist_col <- as.dist(1 - cor(test))
+hcl_col <- hclust(dist_col, method = "average")
+
+dist_row <- as.dist(1 - cor(t(test)))
+hcl_row <- hclust(dist_row, method = "average")
+
+t <- as.matrix(scale(test, center=T, scale=T))
+
+pheatmap::pheatmap(t, cluster_rows = hcl_row, cluster_cols = hcl_col)
+```
+
+
+## extract clusters
+
+```{R}
+out = pheatmap::pheatmap(tab,
+        clustering_distance_rows = "correlation",
+        clustering_distance_cols = "correlation",
+        clustering_method = "average")
+
+# CpGs in rows
+a = rownames(tab[out$tree_row[["order"]],])
+b = sort(cutree(out$tree_row, k=2))
+b = as.data.frame(t(data.frame(as.list(b))))
+b$direction <- ifelse(b$V1 == 1, "Up", "Down")
+b$CpG <- rownames(b)
+colnames(b)[1] <- "cluster"
+b <- b[,c(3,1,2)]
+write.table(b, "/data/TCGA-PRAD/mimQTLs/CpG_clusters.txt", sep = "\t", quote=F, row.names = F)
+
+# miRNAs in columns
+c = colnames(tab[,out$tree_col[["order"]]])
+d = sort(cutree(out$tree_col, k=2))
+d = as.data.frame(t(data.frame(as.list(d))))
+d$direction <- ifelse(d$V1 == 1, "Up", "Down")
+d$miRNA <- rownames(d)
+colnames(d)[1] <- "cluster"
+d <- d[,c(3,1,2)]
+d$miRNA <- gsub("\\.", "-", d$miRNA)
+write.table(d, "/data/TCGA-PRAD/mimQTLs/miRNA_clusters.txt", sep = "\t", row.names = F, quote=F)
+
+```
+
+# scat plot test
+Need to be fussy here and plot only the miRNA and its corresponding overlapping miRNA?
+
+```{R, fig.width=4, fig.height=3}
+library(ggpubr)
+library(scales)
+
+# subset sig.tab
+sig.tab2 <- sig.tab[!duplicated(sig.tab$miRNA),]
+
+for(key in 1:nrow(olap)){
+  
+  row <- olap[key,]
+  mir <- row$V9
+  cpg <- row$V4
+  fn <- paste(mir,cpg,sep=":")
+  
+  df <- data.frame(miR = mirna_counts[mir,], CpG = mVals[cpg,])
+  colnames(df) <- c(mir, cpg)
+  
+  p <- ggscatter(df, x=mir, y=cpg, add = "reg.line", add.params = list(color="blue",                      fill = "lightgrey", linetype="solid", size=0.4), cor.coef = T, conf.int=T,
+                cor.method = "spearman", size = 0.8, ggtheme = theme_bw())
+  png(paste0("/data/TCGA-PRAD/mimQTLs/scatter/", fn, ".png", sep=""), width=4, height=3, units="in", res= 300)
+  plot(p)
+  dev.off()
+}
+
+mir <- colnames(tab)[1]
+cpg <- rownames(tab)[1]
+
+df <- data.frame(miR = mirna_counts[mir,], CpG = mVals[cpg,])
+colnames(df) <- c(mir, cpg)
+
+ggscatter(df, x=mir, y=cpg, add = "reg.line", add.params = list(color="blue", fill = "lightgrey", linetype="solid", size=0.4), conf.int = T, cor.coef = T, cor.method = "spearman", size = 0.8)
+
+
+
++ scale_x_continuous(trans = log10_trans(), labels = scientific) + scale_y_continuous(trans = log10_trans(), labels = scientific) + geom_abline(intercept = 0, pch = 12, linetype="dotted", cex = 0.5, color="gray10")
+```
+
+
+# EnrichR
+
+```{R}
+library(Enr)
+
+```

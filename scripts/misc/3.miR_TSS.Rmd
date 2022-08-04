@@ -1,0 +1,89 @@
+---
+title: "TSS"
+author: "Barry"
+date: "5/12/2022"
+output: html_document
+---
+
+# moonshot plot
+
+```{R}
+library(readr)
+library(ggplot2)
+library(circlize)
+library(dplyr)
+library(RColorBrewer)
+mirs <- read.table("/data/TCGA-PRAD/mirna_res/de_mirs.txt", header=T, sep="\t")
+#genes <- read.table("/data/TCGA-PRAD/mrna_res/de_genes.txt", header=T, sep="\t")
+#cpgs <- read.table("/data/TCGA-PRAD/methylation_res/DMPs.txt", header=T, sep="\t")
+```
+
+# miRNA TSS 
+
+```{R}
+# capture flanking regions - 2kb upstream of TSS. Given how short miRNAs are, there is no need to add downstream regions to this. 
+
+collect <- data.frame(matrix(ncol=7))
+colnames(collect) <- c("mirbase_id", "strand", "TSS", "width", "chromosome", "upstream", "downstream")
+
+for(i in 1:nrow(mirs)){
+  row <- mirs[i,]
+  # strand orientation
+  if(row$strand == "+"){
+    TSS = as.numeric(row$start_position)
+    width = abs(row$start_position - row$end_position) + 1
+    upstream = TSS - 2000
+    downstream = TSS + width
+  }else{
+    TSS = as.numeric(row$end_position)
+    width = abs(row$start_position - row$end_position) + 1
+    upstream = TSS + 2000
+    downstream = TSS - width
+  }
+  vec <- c(row$mirbase_id, row$strand, TSS, width, row$chromosome_name, upstream, downstream)
+  collect[i,] <- vec
+}
+
+# format for bedtools
+collect <- collect[,c(5,6,7,1,2)]
+write.table(collect, "/data/TCGA-PRAD/mirna_res/mirna_TSS.bed", quote=F, row.names = F, sep="\t")
+
+# format DMP for bedtools
+dmp <- read.table("/data/TCGA-PRAD/methylation_res/dmp_filt.txt", header=T, sep="\t")
+#dmp$cpg_end <- dmp$pos + 1
+dmp.bed <- dmp[,c(1, 2, 2, 4, 3)]
+dmp.bed$chr <- gsub("chr", "", dmp.bed$chr)
+write.table(dmp.bed, "/data/TCGA-PRAD/methylation_res/dmp_filt.bed", quote=F, sep="\t", row.names = F)
+```
+
+filt <- subset(cpgs, cpgs$adj.P.Val < 0.05)
+up <- subset(filt, cpgs$logFC > 0.5)
+down <- subset(filt, cpgs$logFC < -0.5)
+cpgs <- rbind(up,down)
+
+mirs <- mirs[,c(6,7,8,2)]
+colnames(mirs) <- c( "chr", "start", "end", "lfc")
+
+##
+mirs$chr <- paste0("chr", mirs$chr, sep="")
+chr<-mirs$chr
+chr<-factor(chr,ordered = TRUE,levels = c("chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10","chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19","chr20","chr21","chr22","chrX","chrY"))
+mirs$chr<-chr
+mirs<-mirs[order(mirs[,1]),]
+mirs$chr<-as.character(mirs$chr)
+chr=unique(mirs$chr)
+##
+
+
+par(mar=c(1,1,1,1))
+circos.initializeWithIdeogram(species = 'hg19',chromosome.index = chr)
+circos.genomicTrack(mirs,
+                    panel.fun = function(region, value, ...) {
+                      circos.genomicLines(region, value, type = "h")
+                    })
+circos.clear()
+
+```
+- subset(targets, targets$symbol %in% key)
+
+```

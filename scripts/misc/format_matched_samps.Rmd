@@ -1,0 +1,276 @@
+---
+title: "format_matched_assays"
+author: "Barry"
+date: '2022-05-27'
+output: html_document
+---
+
+Why this way? mainly to reduce the computational workload, and 2 to treat the study as a matched tumor normal study which should in theory, boost the signal.
+
+# 1. miRNA Staging
+
+## stage data
+
+```{R, quiet=T, warning=F}
+library(data.table)
+
+generate_count_mat <- function(path, pattern) {
+    files = list.files(path, pattern, full.names = TRUE, recursive=TRUE, include.dirs=TRUE)
+    mat = as.data.frame(do.call(cbind, lapply(files, function(x) fread(x, stringsAsFactors = FALSE))))
+    rownames(mat) = mat[,1]
+    mat = as.data.frame(mat[, seq(2, ncol(mat), 4)])
+    return(mat)
+}
+
+# stage raw counts
+mirna_counts <- generate_count_mat("/data/TCGA-PRAD/mirna", "\\.mirbase21.mirnas.quantification.txt$")
+```
+
+```{R}
+# append metadata to counts mat
+library(tidyverse)
+file_names <- list.files("/data/TCGA-PRAD/mirna", "\\.mirbase21.mirnas.quantification.txt$", full.names = FALSE, recursive = TRUE, include.dirs = FALSE)
+file_names <- sub(".*/", "", file_names)
+samplesheet <- read.table("/data/TCGA-PRAD/mirna_meta/mirna_samplesheet.tsv", header=T, sep="\t")
+samplesheet <- samplesheet[match(file_names, samplesheet$File.Name),]
+colnames(mirna_counts) <- samplesheet$Sample.ID
+```
+
+## Grab paired tumor - normal samples
+
+```{R}
+samplesheet <- read.table("/data/TCGA-PRAD/mirna_meta/mirna_samplesheet.tsv", header=T, sep="\t")
+
+## thanks donal o shea
+patients <- unique(samplesheet$Case.ID)
+matched_samples <- c()
+for(i in 1:length(patients)){
+  row <- which(samplesheet$Case.ID == patients[i])
+  sample_type <- substr(samplesheet$Sample.ID[row], 13,16)
+  keep <- c( "-01A" %in% sample_type & "-11A" %in% sample_type) 
+  if(keep == TRUE){
+    matched_samples <- c(matched_samples,c(row[which(sample_type == "-01A")],row[which(sample_type == "-11A")]))
+  }
+}
+
+samplesheet <- samplesheet[matched_samples,]
+```
+
+## append clinical information
+
+```{R}
+clinical <- read.table("/data/TCGA-PRAD/mirna_meta/trimmed_clinical.tsv", header=T)
+clinical <- unique(clinical)
+
+# now merge metadata
+master <- merge(clinical, samplesheet, by.x = "case_submitter_id", by.y = "Case.ID")
+master <- master[,c(1:5, 11:12)]
+rownames(master) <- master$Sample.ID
+```
+
+## subset counts
+```{R}
+mirna_counts <- mirna_counts[,rownames(master)]
+table(rownames(master) == colnames(mirna_counts))
+master <- master[match(colnames(mirna_counts), rownames(master)),]
+table(rownames(master) == colnames(mirna_counts))
+```
+
+# reformat if needed and save meta, counts to file
+```{R}
+master$Sample.Type = ifelse(master$Sample.Type == "Primary Tumor", "Tumor", "Normal")
+master = master[,-c(2)]
+
+write.table(master, "/data/TCGA-PRAD/mirna_matched/mirna_meta.txt", sep="\t", row.names = T, quote=F)
+write.table(mirna_counts, "/data/TCGA-PRAD/mirna_matched/mirna_counts.txt", sep="\t", row.names = T, quote=F)
+```
+
+
+## genes
+
+```{R}
+library(data.table)
+
+generate_count_mat <- function(path, pattern) {
+    files = list.files(path, pattern, full.names = TRUE, recursive=TRUE, include.dirs=TRUE)
+    mat = as.data.frame(do.call(cbind, lapply(files, function(x) fread(x, stringsAsFactors = FALSE))))
+    mat <- mat[-c(1:4),]
+    gene_type <- as.character(mat[,3])
+    rownames(mat) = mat[,1]
+    mat = as.data.frame(mat[, seq(4, ncol(mat), 9)])
+    mat$gene_type <- gene_type
+    mat <- subset(mat, mat$gene_type == "protein_coding")
+    mat <- mat[,-c(ncol(mat))]
+    return(mat)
+}
+
+# stage raw counts
+mrna_counts <- generate_count_mat("/data/TCGA-PRAD/mrna", "\\.rna_seq.augmented_star_gene_counts.tsv$")
+```
+
+```{R}
+library(tidyverse)
+file_names <- list.files("/data/TCGA-PRAD/mrna", "\\.rna_seq.augmented_star_gene_counts.tsv$", full.names = FALSE, recursive = TRUE, include.dirs = FALSE)
+file_names <- sub(".*/", "", file_names)
+samplesheet <- read.table("/data/TCGA-PRAD/mrna_meta/mrna_samplesheet.tsv", header=T, sep="\t")
+samplesheet <- samplesheet[match(file_names, samplesheet$File.Name),]
+colnames(mrna_counts) <- samplesheet$Sample.ID
+```
+
+## Grab paired tumor - normal samples
+
+```{R}
+samplesheet <- read.table("/data/TCGA-PRAD/mrna_meta/mrna_samplesheet.tsv", header=T, sep="\t")
+
+## thanks donal o shea
+patients <- unique(samplesheet$Case.ID)
+matched_samples <- c()
+for(i in 1:length(patients)){
+  row <- which(samplesheet$Case.ID == patients[i])
+  sample_type <- substr(samplesheet$Sample.ID[row], 13,16)
+  keep <- c( "-01A" %in% sample_type & "-11A" %in% sample_type) 
+  if(keep == TRUE){
+    matched_samples <- c(matched_samples,c(row[which(sample_type == "-01A")],row[which(sample_type == "-11A")]))
+  }
+}
+
+samplesheet <- samplesheet[matched_samples,]
+```
+
+## append clinical information
+
+```{R}
+clinical <- read.table("/data/TCGA-PRAD/mrna_meta/trimmed_clinical.tsv", header=T)
+clinical <- unique(clinical)
+
+# now merge metadata
+master <- merge(clinical, samplesheet, by.x = "case_submitter_id", by.y = "Case.ID")
+master <- master[,c(1:5, 11:12)]
+rownames(master) <- master$Sample.ID
+```
+
+## subset counts
+```{R}
+mrna_counts <- mrna_counts[,rownames(master)]
+table(rownames(master) == colnames(mrna_counts))
+master <- master[match(colnames(mrna_counts), rownames(master)),]
+table(rownames(master) == colnames(mrna_counts))
+```
+
+# reformat if needed and save meta, counts to file
+```{R}
+master$Sample.Type = ifelse(master$Sample.Type == "Primary Tumor", "Tumor", "Normal")
+master = master[,-c(2)]
+
+write.table(master, "/data/TCGA-PRAD/mrna_matched/mrna_meta.txt", sep="\t", row.names = T, quote=F)
+write.table(mrna_counts, "/data/TCGA-PRAD/mrna_matched/mrna_counts.txt", sep="\t", row.names = T, quote=F)
+```
+
+## methyl
+
+```{R}
+load("/data/TCGA-PRAD/methylation_meta/rgSet.RData")
+rgSet # pay attention to dimensions
+```
+
+```{R}
+samplesheet <- read.table("/data/TCGA-PRAD/methylation_meta/methylation_samplesheet.tsv", header=T, stringsAsFactors = T, sep="\t")
+samplesheet$sanity <- gsub('.{9}$', '',samplesheet$File_Name)
+table(sampleNames(rgSet) == samplesheet$sanity)
+samplesheet <- samplesheet[match(sampleNames(rgSet), samplesheet$sanity),]
+
+#now rename columns 
+sampleNames(rgSet) <- samplesheet$Sample_ID
+table(sampleNames(rgSet) == samplesheet$Sample_ID)
+```
+## matched
+```{R}
+## thanks donal o shea
+patients <- unique(samplesheet$Case_ID)
+matched_samples <- c()
+for(i in 1:length(patients)){
+  row <- which(samplesheet$Case_ID == patients[i])
+  sample_type <- substr(samplesheet$Sample_ID[row], 13,16)
+  keep <- c( "-01A" %in% sample_type & "-11A" %in% sample_type) 
+  if(keep == TRUE){
+    matched_samples <- c(matched_samples,c(row[which(sample_type == "-01A")],row[which(sample_type == "-11A")]))
+  }
+}
+
+samplesheet <- samplesheet[matched_samples,]
+```
+
+## append clinical information
+
+```{R}
+clinical <- read.table("/data/TCGA-PRAD/methylation_meta/trimmed_clinical.tsv", header=T)
+clinical <- unique(clinical)
+colnames(clinical)[1] <- "Case_ID"
+
+# now merge metadata
+master <- merge(clinical, samplesheet, by.x = "case_submitter_id", by.y = "Case_ID")
+master <- master[,c(1:5, 11:12)]
+rownames(master) <- master$Sample_ID
+```
+
+# subset rgSet now
+
+```{R}
+keep <- rownames(master)
+rgSet <- rgSet[,keep]
+rgSet
+```
+
+# perform filtering, subset mVals at the end.
+
+# filter by p-value detection vals
+```{R}
+detP <- detectionP(rgSet)
+```
+
+```{R}
+keep <- colMeans(detP) < 0.01 # they all pass, skip this
+rgSet <- rgSet[,keep]
+
+# update annotations
+samplesheet <- samplesheet[match(sampleNames(rgSet), samplesheet$Sample_ID),]
+
+#now rename columns 
+sampleNames(rgSet) <- samplesheet$Sample_ID
+table(sampleNames(rgSet) == samplesheet$Sample_ID)
+rm(detP)
+```
+
+# normalise, format metadata and save to file
+```{R}
+mSetSq <- preprocessFunnorm(rgSet) #funnorm for tumor - norm samples!
+rm(rgSet)
+#save.image("/data/TCGA-PRAD/methylation_meta/mSetSq.RData")
+# check colname preservation
+#rm(rgSet)
+#load("/data/TCGA-PRAD/methylation_meta/mSetSq.RData")
+table(sampleNames(mSetSq) == rownames(master))
+
+```
+
+# Probe filtering
+
+```{R}
+mSetSq <- dropLociWithSnps(mSetSq)
+mSetSq
+
+reactive_probes <- read.csv("/data/TCGA-PRAD/methylation_meta/cross_reactive_probes.csv", sep=",", header=T)
+keep <- !(featureNames(mSetSq) %in% reactive_probes$TargetID)
+mSetSq <- mSetSq[keep,] 
+mSetSq
+```
+
+# mvals, master out
+
+```{R}
+mVals <- getM(mSetSq)
+table(colnames(mVals)==rownames(master))
+
+write.table(master, "/data/TCGA-PRAD/methylation_matched/methylation_meta.txt", sep="\t", row.names = T, quote=F)
+write.table(mVals, "/data/TCGA-PRAD/methylation_matched/mVals.txt", row.names = T, sep="\t", quote=F)
+```

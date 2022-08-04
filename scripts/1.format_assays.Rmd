@@ -1,0 +1,244 @@
+---
+title: "TCGA-PRAD formatting"
+author: "Barry"
+date: "4/26/2022"
+output: html_document
+---
+
+# 1. miRNA Staging
+
+```{R, quiet=T, warning=F}
+library(data.table)
+
+generate_count_mat <- function(path, pattern) {
+    files = list.files(path, pattern, full.names = TRUE, recursive=TRUE, include.dirs=TRUE)
+    mat = as.data.frame(do.call(cbind, lapply(files, function(x) fread(x, stringsAsFactors = FALSE))))
+    rownames(mat) = mat[,1]
+    mat = as.data.frame(mat[, seq(2, ncol(mat), 4)])
+    return(mat)
+}
+
+# stage raw counts
+mirna_counts <- generate_count_mat("/data/TCGA-PRAD/mirna", "\\.mirbase21.mirnas.quantification.txt$")
+```
+
+```{R}
+# append metadata to counts mat
+library(tidyverse)
+file_names <- list.files("/data/TCGA-PRAD/mirna", "\\.mirbase21.mirnas.quantification.txt$", full.names = FALSE, recursive = TRUE, include.dirs = FALSE)
+file_names <- sub(".*/", "", file_names)
+samplesheet <- read.table("/data/TCGA-PRAD/mirna_meta/mirna_samplesheet.tsv", header=T, sep="\t")
+samplesheet <- samplesheet[match(file_names, samplesheet$File.Name),]
+colnames(mirna_counts) <- samplesheet$Sample.ID
+mirna_meta <- subset(samplesheet, select=c(Sample.ID, Sample.Type))
+rownames(mirna_meta) <- NULL
+mirna_meta <- column_to_rownames(mirna_meta, var="Sample.ID")
+```
+
+
+Append clinical meta (awk'ed in terminal first) 
+Command used:
+```bash
+awk -v OFS="\t" 'BEGIN {FS="\t"}; {print $1,$2,$4,$15,$29}' clinical.tsv | tr ' ' '_' | sed "s/'--/NA/" > trimmed_clinical.tsv
+```
+Logic:
+* tr to fix race, sed to fix '-- for non entry in T2c.. T2b
+
+```{R}
+# entries are duplicated (follow up?) but we only need one line. 
+clinical <- read.table("/data/TCGA-PRAD/mirna_meta/trimmed_clinical.tsv", header=T)
+clinical <- unique(clinical)
+```
+
+Now we have 497 patients, must match to samplesheet and subset counts and then we are finished..
+
+```{R}
+# now merge metadata
+master <- merge(clinical, samplesheet, by.x = "case_submitter_id", by.y = "Case.ID")
+master <- master[,c(1:5, 11:12)]
+rownames(master) <- master$Sample.ID
+table(rownames(master) == colnames(mirna_counts))
+master <- master[match(colnames(mirna_counts), rownames(master)),]
+table(rownames(master) == colnames(mirna_counts))
+```
+
+Tidy and export.
+
+```{R}
+rm(mrna_meta, samplesheet, clinical, key, file_names)
+mirna_meta <- master
+rm(master)
+save.image(file = "/data/TCGA-PRAD/mirna_meta/mirna.RData")
+```
+
+
+# 2. mRNA Staging
+
+very memory intensive step!
+
+```{R}
+library(data.table)
+
+generate_count_mat <- function(path, pattern) {
+    files = list.files(path, pattern, full.names = TRUE, recursive=TRUE, include.dirs=TRUE)
+    mat = as.data.frame(do.call(cbind, lapply(files, function(x) fread(x, stringsAsFactors = FALSE))))
+    mat <- mat[-c(1:4),]
+    gene_type <- as.character(mat[,3])
+    rownames(mat) = mat[,1]
+    mat = as.data.frame(mat[, seq(4, ncol(mat), 9)])
+    mat$gene_type <- gene_type
+    mat <- subset(mat, mat$gene_type == "protein_coding")
+    mat <- mat[,-c(ncol(mat))]
+    return(mat)
+}
+
+# stage raw counts
+mrna_counts <- generate_count_mat("/data/TCGA-PRAD/mrna", "\\.rna_seq.augmented_star_gene_counts.tsv$")
+```
+
+```{R}
+library(tidyverse)
+file_names <- list.files("/data/TCGA-PRAD/mrna", "\\.rna_seq.augmented_star_gene_counts.tsv$", full.names = FALSE, recursive = TRUE, include.dirs = FALSE)
+file_names <- sub(".*/", "", file_names)
+samplesheet <- read.table("/data/TCGA-PRAD/mrna_meta/mrna_samplesheet.tsv", header=T, sep="\t")
+samplesheet <- samplesheet[match(file_names, samplesheet$File.Name),]
+colnames(mrna_counts) <- samplesheet$Sample.ID
+mrna_meta <- subset(samplesheet, select=c(Sample.ID, Sample.Type))
+rownames(mrna_meta) <- NULL
+mrna_meta <- column_to_rownames(mrna_meta, var="Sample.ID")
+```
+
+```{R}
+# entries are duplicated (follow up?) but we only need one line. 
+clinical <- read.table("/data/TCGA-PRAD/mrna_meta/trimmed_clinical.tsv", header=T)
+clinical <- unique(clinical)
+```
+
+match to samplesheet and subset counts and then we are finished..
+
+```{R}
+# now merge metadata
+master <- merge(clinical, samplesheet, by.x = "case_submitter_id", by.y = "Case.ID")
+master <- master[,c(1:5, 11:12)]
+rownames(master) <- master$Sample.ID
+rownames(master) == colnames(mrna_counts)
+master <- master[match(colnames(mrna_counts), rownames(master)),]
+rownames(master) == colnames(mrna_counts)
+```
+
+Tidy and export.
+
+```{R}
+rm(mrna_meta, samplesheet, clinical, key, file_names)
+mrna_meta <- master
+rm(master)
+save.image(file = "/data/TCGA-PRAD/mrna_meta/mrna.RData")
+```
+
+
+# 3. Methylation Staging
+
+```{R}
+library(minfi)
+# time consuming proc
+#rgSet <- read.metharray.exp("/data/TCGA-PRAD/methylation")
+#save.image("/data/TCGA-PRAD/methylation_meta/rgSet.RData")
+load("/data/TCGA-PRAD/methylation_meta/rgSet.RData")
+head(sampleNames(rgSet))
+```
+
+# append sample ID as colnames, not filename
+
+```{R}
+samplesheet <- read.table("/data/TCGA-PRAD/methylation_meta/methylation_samplesheet.tsv", header=T, stringsAsFactors = T, sep="\t")
+samplesheet$sanity <- gsub('.{9}$', '',samplesheet$File_Name)
+table(sampleNames(rgSet) == samplesheet$sanity)
+samplesheet <- samplesheet[match(sampleNames(rgSet), samplesheet$sanity),]
+
+#now rename columns 
+sampleNames(rgSet) <- samplesheet$Sample_ID
+table(sampleNames(rgSet) == samplesheet$Sample_ID)
+```
+
+# filter by p-value detection vals
+```{R}
+detP <- detectionP(rgSet)
+```
+
+```{R}
+pal <- RColorBrewer::brewer.pal(8, "Dark2")
+png("/data/TCGA-PRAD/methylation_meta/pval_det.png")
+barplot(colMeans(detP), col=pal[factor(samplesheet$Sample_Type)], las = 2, cex.names = 0.4, main = "Mean detection p-values")
+abline(h=0.01,col="red")
+dev.off()
+```
+
+```{R}
+keep <- colMeans(detP) < 0.01
+rgSet <- rgSet[,keep]
+
+# update annotations
+samplesheet <- samplesheet[match(sampleNames(rgSet), samplesheet$Sample_ID),]
+
+#now rename columns 
+sampleNames(rgSet) <- samplesheet$Sample_ID
+table(sampleNames(rgSet) == samplesheet$Sample_ID)
+rm(detP)
+```
+
+# normalise, format metadata and save to file
+```{R}
+mSetSq <- preprocessQuantile(rgSet)
+rm(rgSet)
+save.image("/data/TCGA-PRAD/methylation_meta/mSetSq.RData")
+# check colname preservation
+#rm(rgSet)
+#load("/data/TCGA-PRAD/methylation_meta/mSetSq.RData")
+table(sampleNames(mSetSq) == samplesheet$Sample_ID)
+clinical <- read.table("/data/TCGA-PRAD/methylation_meta/trimmed_clinical.tsv", header=T, sep="\t")
+master <- merge(samplesheet, clinical, by.x = "Case_ID", by.y = "case_submitter_id")
+master <- master[seq(1, nrow(master), 2),]
+master <- master[match(samplesheet$Sample_ID, master$Sample_ID),]
+table(sampleNames(mSetSq) == master$Sample_ID)
+```
+
+```{R}
+methyl_meta <- master
+rownames(methyl_meta) <- methyl_meta$Sample_ID
+methyl_meta <- methyl_meta[,c(1, 10,11,12,13,7,8)]
+rm(master, clinical, rgSet, samplesheet)
+# reproducibility note: objects may be out of order in this code block. 
+#save.image(file = "/data/TCGA-PRAD/methylation_meta/methyl.RData")
+```
+
+# Methylation filtering
+
+```{R}
+load("/data/TCGA-PRAD/methylation_meta/methyl.RData")
+
+methyl_meta <- methyl_meta[!(methyl_meta$Sample_ID == "TCGA-V1-A9O5-06A"),]
+
+keep <- !(sampleNames(mSetSq) == "TCGA-V1-A9O5-06A")
+mSetSq <- mSetSq[,keep]
+mSetSq
+
+mSetSq <- dropLociWithSnps(mSetSq)
+mSetSq
+
+reactive_probes <- read.csv("/data/TCGA-PRAD/methylation_meta/cross_reactive_probes.csv", sep=",", header=T)
+keep <- !(featureNames(mSetSq) %in% reactive_probes$TargetID)
+mSetSq <- mSetSq[keep,] 
+mSetSq
+```
+
+```{r}
+rm(reactive_probes, keep)
+mVals <- getM(mSetSq)
+
+bVals <- getBeta(mSetSq)
+
+mSetSeq_flt <- mSetSq
+rm(mSetSq)
+
+save.image("/data/TCGA-PRAD/methylation_meta/mSetSq_filt.RData")
+```

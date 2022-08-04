@@ -1,0 +1,420 @@
+---
+title: "mirna_analysis"
+author: "Barry"
+date: "5/4/2022"
+output: html_document
+---
+
+```{R}
+library(DESeq2)
+library(ggpubr)
+library(biomaRt)
+
+get_upregulated <- function(df){
+
+	key <- intersect(rownames(df)[which(df$log2FoldChange>=1)], rownames(df)[which(df$padj<=0.05)])
+
+    results <- as.data.frame((df)[which(rownames(df) %in% key),])
+	return(results)
+}
+
+get_downregulated <- function(df){
+
+  	key <- intersect(rownames(df)[which(df$log2FoldChange<=-1)], rownames(df)[which(df$padj<=0.05)])
+
+  	results <- as.data.frame((df)[which(rownames(df) %in% key),])
+  	return(results)
+}
+
+```
+
+#######################################
+# 1. miRNA
+#######################################
+
+Drop the metastatic sample here
+```{R}
+mirna_counts = read.table("/data/TCGA-PRAD/mirna_matched/mirna_counts.txt", sep="\t", header=T)
+colnames(mirna_counts) = gsub("\\.", "-", colnames(mirna_counts))
+mirna_meta = read.table("/data/TCGA-PRAD/mirna_matched/mirna_meta.txt", sep="\t", header=T)
+mirna_meta$case_submitter_id = factor(mirna_meta$case_submitter_id)
+mirna_meta$age_at_index = as.numeric(mirna_meta$age_at_index)
+mirna_meta$race = factor(mirna_meta$race)
+mirna_meta$ajcc_pathologic_t = factor(mirna_meta$ajcc_pathologic_t)
+mirna_meta$Sample.Type = factor(mirna_meta$Sample.Type)
+```
+
+
+```{R, message=F}
+library(DESeq2)
+library(IHW)
+library(apeglm)
+
+dds <- DESeqDataSetFromMatrix(mirna_counts, mirna_meta, design = ~ case_submitter_id + Sample.Type)
+dds$condition <- relevel(dds$Sample.Type, ref = "Normal")
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+# EDA
+
+```{R}
+mirna_vst <- varianceStabilizingTransformation(dds, blind=F)
+mirna_vst <- assay(mirna_vst)
+write.table(mirna_vst, "/data/TCGA-PRAD/mirna_matched/mirna_vst.txt", sep="\t", row.names = T, quote=F)
+
+
+PCA <- PCAtools::pca(mirna_vst, metadata = mirna_meta, removeVar = 0.1)
+
+dataGG <- data.frame(PC1 = PCA$rotated[,1], PC2 = PCA$rotated[,2],
+                    Condition = mirna_meta$Sample.Type)
+
+
+ggscatter(dataGG, x="PC1", y="PC2",
+                  color = "Condition", palette = c("dodgerblue4", "darkorange2"),
+                  title = "PCA plot VST transformed miRNA expression data",
+                  subtitle = "TCGA-PRAD",
+                  xlab = paste0("PC1, VarExp: ", round(PCA$variance[1], digits=2), "%"),
+                  ylab = paste0("PC2, VarExp: ", round(PCA$variance[2], digits=2), "%"),
+                  ellipse = T, star.plot = T, ellipse.alpha = 0.2,
+                  ggtheme = theme_bw()) + 
+                  theme(legend.position = "right") + 
+                  theme(plot.title = element_text(face = "bold"))
+
+png("/data/TCGA-PRAD/mirna_matched/PCA_biplot.png", width = 500, height = 500, units="px") # remake
+ggscatter(dataGG, x="PC1", y="PC2",
+                  color = "Condition", palette = c("dodgerblue4", "darkorange2"),
+                  title = "PCA plot VST transformed miRNA expression data",
+                  subtitle = "TCGA-PRAD",
+                  xlab = paste0("PC1, VarExp: ", round(PCA$variance[1], digits=2), "%"),
+                  ylab = paste0("PC2, VarExp: ", round(PCA$variance[2], digits=2), "%"),
+                  ellipse = T, star.plot = T, ellipse.alpha = 0.2,
+                  ggtheme = theme_bw()) + 
+                  theme(legend.position = "right") + 
+                  theme(plot.title = element_text(face = "bold"))
+dev.off()
+```
+
+# RESULTS
+```{R}
+res <- results(dds, filterFun=ihw, alpha=0.05, c("Sample.Type", "Tumor", "Normal"))
+lfc_res <- lfcShrink(dds=dds, res=res, coef=length(resultsNames(dds)), type="apeglm")
+res_df <- as.data.frame(lfc_res)
+#plotCounts(dds, "hsa-mir-5704", intgroup = "Sample.Type") # sanity check of fold change direction.
+up <- get_upregulated(res_df)
+down <- get_downregulated(res_df)
+
+de_mirs <- rbind(up,down)
+write.table(de_mirs, "/data/TCGA-PRAD/mirna_matched/de_mirs.txt", sep="\t", row.names=T, quote=F)
+```
+
+# volcano
+
+```{R}
+res_df <- na.omit(res_df)
+
+res_df$expression = ifelse(res_df$padj < 0.05 & abs(res_df$log2FoldChange) >= 1, 
+                     ifelse(res_df$log2FoldChange> 1 ,'upregulated','downregulated'),
+                     'not significant')
+
+p = ggplot(data = res_df, 
+            aes(x = log2FoldChange, 
+                y = -log10(res_df$padj), 
+                colour=expression)) +
+  geom_point(alpha=0.6, size=2) +
+  scale_color_manual(values=c("blue", "grey","red"))+
+  xlim(c(-5.5, 5.5)) +
+  geom_vline(xintercept=c(-1,1),lty=4,col="black",lwd=0.3) +
+  geom_hline(yintercept = 1.301,lty=4,col="black",lwd=0.3) +
+  labs(x="log2(fold change)",
+       y="-log10 (adj.p-value)",
+       title="Differentially Expressed miRNAs") +
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position=c(0.9, 0.855), 
+        legend.title = element_blank(),
+        legend.background = element_rect(fill = "white", color = "black"))
+
+png("/data/TCGA-PRAD/mirna_matched/volcano.png", width = 500, height = 500, units="px")
+plot(p)
+dev.off()
+```
+
+# Annotate with genomic locations for Circos etc.
+
+```{R}
+library(biomaRt)
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+info <- getBM(attributes=c("mirbase_id",
+                               "ensembl_gene_id_version",
+                               "chromosome_name",
+                               "start_position",
+                               "end_position",
+                               "strand"),
+                  filters = c("mirbase_id"),
+                  values = rownames(de_mirs),
+                  mart = mart,
+                  useCache=FALSE)
+
+info$strand <- gsub("-1", "-", info$strand)
+info$strand <- gsub("1", "+", info$strand)
+
+## Alt chroms account for duplicated mir IDS. 
+info <- info[!grepl("CHR_", info$chromosome_name),]
+
+de_mirs$mirbase_id <- rownames(de_mirs)
+de_mirs <- merge(de_mirs, info, by = "mirbase_id")
+de_mirs <- de_mirs[,c(1,3,5:11)]
+write.table(de_mirs, "/data/TCGA-PRAD/mirna_res/de_mirs.txt", row.names = F, sep="\t", quote=F)
+```
+
+#######################################
+# 2. mRNA
+#######################################
+
+```{R}
+mrna_counts = read.table("/data/TCGA-PRAD/mrna_matched/mrna_counts.txt", sep="\t", header=T)
+colnames(mrna_counts) = gsub("\\.", "-", colnames(mrna_counts))
+mrna_meta = read.table("/data/TCGA-PRAD/mrna_matched/mrna_meta.txt", sep="\t", header=T)
+mrna_meta$case_submitter_id = factor(mrna_meta$case_submitter_id)
+mrna_meta$Sample.Type = factor(mrna_meta$Sample.Type)
+```
+
+```{R}
+dds <- DESeqDataSetFromMatrix(mrna_counts, mrna_meta, design = ~ case_submitter_id + Sample.Type)
+dds$condition <- relevel(dds$Sample.Type, ref = "Normal")
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+```{R}
+mrna_vst <- DESeq2::varianceStabilizingTransformation(dds, blind=F)
+mrna_vst = assay(mrna_vst)
+write.table(mrna_vst, "/data/TCGA-PRAD/mrna_matched/mrna_vst.txt", sep="\t", row.names=T, quote=F)
+```
+
+# EDA
+
+```{R}
+PCA <- PCAtools::pca(mrna_vst, metadata = mrna_meta, removeVar = 0.1)
+
+dataGG <- data.frame(PC1 = PCA$rotated[,1], PC2 = PCA$rotated[,2],
+                    Condition = mrna_meta$Sample.Type)
+
+
+png("/data/TCGA-PRAD/mrna_matched/PCA_biplot.png", width = 500, height = 500, units="px") # remake
+ggscatter(dataGG, x="PC1", y="PC2",
+                  color = "Condition", palette = c("dodgerblue4", "darkorange2"),
+                  title = "PCA plot VST transformed mRNA expression data",
+                  subtitle = "TCGA-PRAD",
+                  xlab = paste0("PC1, VarExp: ", round(PCA$variance[1], digits=2), "%"),
+                  ylab = paste0("PC2, VarExp: ", round(PCA$variance[2], digits=2), "%"),
+                  ellipse = T, star.plot = T, ellipse.alpha = 0.2,
+                  ggtheme = theme_bw()) + 
+                  theme(legend.position = "right") + 
+                  theme(plot.title = element_text(face = "bold"))
+dev.off()
+```
+
+```{R}
+res <- results(dds, filterFun=IHW::ihw, alpha=0.05, c("Sample.Type", "Tumor", "Normal"))
+lfc_res <- lfcShrink(dds=dds, res=res, coef=length(resultsNames(dds)), type="apeglm")
+res_df <- as.data.frame(lfc_res)
+#plotCounts(dds, "ENSG00000122133.17", intgroup = "Sample.Type") # sanity check of fold change direction.
+up <- get_upregulated(res_df)
+down <- get_downregulated(res_df)
+
+de_genes <- rbind(up,down)
+```
+
+# volcano
+
+```{R}
+res_df <- na.omit(res_df)
+
+res_df$expression = ifelse(res_df$padj < 0.05 & abs(res_df$log2FoldChange) >= 1, 
+                     ifelse(res_df$log2FoldChange> 1 ,'upregulated','downregulated'),
+                     'not significant')
+
+p = ggplot(data = res_df, 
+            aes(x = log2FoldChange, 
+                y = -log10(res_df$padj), 
+                colour=expression)) +
+  geom_point(alpha=0.6, size=2) +
+  scale_color_manual(values=c("blue", "grey","red"))+
+  xlim(c(-5.5, 5.5)) +
+  geom_vline(xintercept=c(-1,1),lty=4,col="black",lwd=0.3) +
+  geom_hline(yintercept = 1.301,lty=4,col="black",lwd=0.3) +
+  labs(x="log2(fold change)",
+       y="-log10 (adj.p-value)",
+       title="Differentially Expressed mRNAs") +
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position=c(0.9, 0.855), 
+        legend.title = element_blank(),
+        legend.background = element_rect(fill = "white", color = "black"))
+
+png("/data/TCGA-PRAD/mrna_matched/volcano.png", width = 500, height = 500, units="px")
+plot(p)
+dev.off()
+```
+
+```{R}
+library(biomaRt)
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+#rownames(de_genes) <- sub("\\..*", "", rownames(de_genes))
+
+#info <- getBM(attributes=c("hgnc_symbol",
+#                           "ensembl_gene_id",
+#                           "ensembl_gene_id_version",
+#                               "chromosome_name",
+#                               "start_position",
+#                               "end_position",
+#                               "strand"),
+#                  filters = c("ensembl_gene_id_version"),
+#                  values = rownames(de_genes),
+#                  mart = mart,
+#                  useCache=T)
+
+## huge biomart issue here - will not connect. We can extract gene names for correlation analysis now and return to coordinates when we need them.
+
+
+
+
+info$strand <- gsub("-1", "-", info$strand)
+info$strand <- gsub("1", "+", info$strand)
+
+# missing 6, cant retrieve info (crucial for CPG overlaps) so must settle and discard these. 
+de_genes$ensembl_gene_id <- rownames(de_genes)
+#info <- subset(info, select=-c(ensembl_gene_id))
+info$strand <- gsub("-1", "-", info$strand)
+info$strand <- gsub("1", "+", info$strand)
+
+
+de_genes <- merge(de_genes, info, by = "ensembl_gene_id")
+de_genes <- de_genes[,c(7,3,5,6,8:12)]
+write.table(de_genes, "/data/TCGA-PRAD/mrna_res/de_genes.txt", row.names = F, sep="\t", quote=F)
+```
+
+# Methylaion DE
+
+```{R}
+mVals = read.table("/data/TCGA-PRAD/methylation_matched/mVals.txt", sep="\t", header=T)
+methylation_meta = read.table("/data/TCGA-PRAD/methylation_matched/methylation_meta.txt", header=T, sep="\t")
+methylation_meta$Sample_Type = ifelse(methylation_meta$Sample_Type == "Primary Tumor", "Tumor", "Normal")
+```
+
+
+# EDA
+```{R}
+pal <- RColorBrewer::brewer.pal(2, "Dark2")
+png("/data/TCGA-PRAD/methylation_matched/PCA_biplot.png", height = 500, width = 500, units = "px")
+limma::plotMDS(mVals, top=10000, gene.selection="common", pch = 16,
+        col=pal[factor(methylation_meta$Sample_Type)])
+legend("topleft", legend=levels(factor(methylation_meta$Sample_Type)), text.col=pal,
+       bg="white", cex=0.7)
+dev.off()
+```
+
+# LIMMA
+```{R}
+# this is the factor of interest
+SampleType <- factor(methylation_meta$Sample_Type)
+Patient = factor(methylation_meta$case_submitter_id)
+# use the above to create a design matrix
+design <- model.matrix(~0+SampleType+Patient)
+#colnames(design) <- c("Normal", "Tumor")
+ 
+# fit the linear model 
+fit <- limma::lmFit(mVals, design)
+# create a contrast matrix for specific comparisons
+colnames(design) = gsub("-", "", colnames(design))
+contMatrix <- limma::makeContrasts(SampleTypeTumor - SampleTypeNormal, levels=design)
+
+colnames(fit$coefficients) <- gsub("-", "", colnames(fit$coefficients))
+fit2 <- limma::contrasts.fit(fit, contMatrix)
+
+ebfit <- limma::eBayes(fit2)
+tt = limma::topTable(ebfit, coef="SampleTypeTumor - SampleTypeNormal", number = Inf, adjust.method = "BH", p.value = 0.05, lfc = 1)
+```
+
+```{R}
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ann450k_ranges <- makeGRangesFromDataFrame(ann450k[,1:4],
+                              keep.extra.columns=T,
+                              ignore.strand=FALSE,
+                              seqinfo=NULL,
+                              seqnames.field=c("seqnames", "seqname",
+                                               "chromosome", "chrom",
+                                               "chr", "chromosome_name",
+                                               "seqid"),
+                              start.field="pos",
+                              end.field="pos",
+                              strand.field="strand",
+                              starts.in.df.are.0based=FALSE)
+chain=rtracklayer::import.chain("/data/TCGA-PRAD/methylation_meta/hg19ToHg38.over.chain")
+hg38loc <- rtracklayer::liftOver(ann450k_ranges,chain)
+hg38locDF <- data.frame(hg38loc)
+rownames(hg38locDF) <- hg38locDF$group_name
+pos38<-start(unlist(hg38loc))
+ann450k_ranges=data.frame(ann450k,"pos.hg19"=ann450k$pos)
+ann450k_ranges$pos=rep(NA,dim(ann450k_ranges)[1])
+ann450k_ranges[hg38locDF$Name, "pos"]=hg38locDF[,"start"]
+
+ann450kSub <- ann450k_ranges[match(rownames(mVals),ann450k_ranges$Name),
+                      c(1:4,12:19,24:ncol(ann450k_ranges))]
+
+DMPs <- limma::topTable(ebfit, coef="SampleTypeTumor - SampleTypeNormal", number = Inf, adjust.method = "BH", genelist = ann450kSub)
+
+# sanity check for limma design below (tumor is up )
+
+#par(mfrow=c(2,2))
+#sapply(rownames(DMPs)[1:4], function(cpg){
+#  plotCpg(mVals, cpg=cpg, pheno=methylation_meta$Sample_Type, ylab = "M values")
+#})
+
+DMP_filt = subset(DMPs, DMPs$adj.P.Val < 0.05)
+up = subset(DMP_filt, DMP_filt$logFC > 1)
+down = subset(DMP_filt, DMP_filt$logFC < -1)
+DMP_filt = rbind(up,down)
+
+write.table(DMP_filt, "/data/TCGA-PRAD/methylation_matched/dmp_filt.txt", sep="\t", row.names = T, quote=T)
+```
+
+# volcano
+
+```{R}
+
+res_df <- DMPs
+res_df <- res_df[,c(24,28)]
+
+
+res_df$expression = ifelse(res_df$adj.P.Val < 0.05 & abs(res_df$logFC) >= 1, 
+                     ifelse(res_df$logFC> 1 ,'upregulated','downregulated'),
+                     'not significant')
+require(ggplot2)
+p = ggplot(data = res_df, 
+            aes(x = logFC, 
+                y = -log10(res_df$adj.P.Val), 
+                colour=expression)) +
+  geom_point(alpha=0.6, size=2) +
+  scale_color_manual(values=c("blue", "grey","red"))+
+  xlim(c(-7, 7)) + ylim(c(0,25)) +
+  geom_vline(xintercept=c(-1,1),lty=4,col="black",lwd=0.3) +
+  geom_hline(yintercept = 1.301,lty=4,col="black",lwd=0.3) +
+  labs(x="log2(fold change)",
+       y="-log10 (adj.p-value)",
+       title="Differentially Expressed CpG Probes") +
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position=c(0.9, 0.855), 
+        legend.title = element_blank(),
+        legend.background = element_rect(fill = "white", color = "black"))
+
+png("/data/TCGA-PRAD/methylation_matched/volcano.png", width = 500, height = 500, units="px")
+plot(p)
+dev.off()
+```

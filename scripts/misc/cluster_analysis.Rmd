@@ -1,0 +1,195 @@
+---
+title: "cluster_analysis"
+author: "Barry"
+date: '2022-05-25'
+output: html_document
+---
+
+# cluster A 
+
+```{R}
+mrna_vst <- as.matrix(read.table("/data/TCGA-PRAD/mimQTLs/mrna_vst.txt", header=T, sep="\t"))
+colnames(mrna_vst) = gsub("\\.", "-", colnames(mrna_vst))
+mirna_vst <- as.matrix(read.table("/data/TCGA-PRAD/mimQTLs/mirna_vst.txt", header=T, sep="\t"))
+colnames(mirna_vst) <- gsub("\\.", "-", colnames(mirna_vst))
+```
+
+# subset
+```{R}
+# mirna
+clusters = read.table("/data/TCGA-PRAD/mimQTLs/miRNA_clusters.txt", header=T, sep="\t")
+a = rownames(subset(clusters, clusters$x == "1"))
+mirna_vst = mirna_vst[a,]
+
+#mrna
+deg = read.table("/data/TCGA-PRAD/mrna_res/deg_deseq2.txt", sep="\t", header=T)
+mrna_vst <- mrna_vst[rownames(deg),]
+
+# match
+samps <- intersect(colnames(mirna_vst), colnames(mrna_vst))
+mrna_vst <- mrna_vst[,samps]
+mirna_vst <- mirna_vst[,samps]
+all(colnames(mrna_vst)==colnames(mirna_vst))
+```
+
+
+# Hieracrchical Clustering (A)
+
+```{R}
+tab <- read.table("/data/TCGA-PRAD/miRNA_cluster/cluster_A_tab.txt")
+colnames(tab) = gsub("\\.", "-", colnames(tab))
+deg <- read.table("/data/TCGA-PRAD/mrna_res/deg_deseq2.txt", header=T, sep="\t")
+dem <- read.table("/data/TCGA-PRAD/mirna_res/de_mirs.txt", header=T, sep="\t")
+sig.tab = read.table("/data/TCGA-PRAD/miRNA_cluster/cluster_A_sig.tab.txt", header=T, sep="\t")
+sig.tab <- subset(sig.tab, sig.tab$Spearman_cor > 0.4 | sig.tab$Spearman_cor < -0.4)
+sig_mirs_a <- unique(sig.tab$miRNA)
+sig_gene_a <- unique(sig.tab$Gene)
+
+# subset tab to have signif strong corr
+tab <- tab[sig_gene_a,]
+tab <- tab[,sig_mirs_a]
+```
+
+```{R}
+col_anno <- subset(dem, dem$mirbase_id %in% colnames(tab))
+col_anno$direction <- ifelse(col_anno$log2FoldChange > 0, "Up", "Down")
+col_anno <- col_anno[!duplicated(col_anno$mirbase_id),]
+annot_col <- data.frame(row.names = col_anno$mirbase_id, Direction = factor(col_anno$direction))
+
+cols <- c("red", "blue")
+names(cols) <- c("Up", "Down")
+annot_colors <- list(Direction = cols)
+
+row_anno <- subset(deg, rownames(deg) %in% rownames(tab))
+row_anno$direction <- ifelse(row_anno$log2FoldChange > 0, "Up", "Down")
+annot_row <- data.frame(row.names = rownames(row_anno), Direction = factor(row_anno$direction))
+
+
+pheatmap::pheatmap(tab, clustering_distance_rows = "correlation", 
+                   clustering_distance_cols = "correlation",
+                   clustering_method = "average",
+                   annotation_colors = annot_colors,
+                   annotation_row = annot_row,
+                   annotation_col = annot_col,
+                   col = hcl.colors(200, "Purple-Green",rev=F),
+                   show_rownames=F,
+                   show_colnames=T)
+```
+
+# Enrich R
+
+```{R}
+library(enrichR)
+
+setEnrichrSite("Enrichr")
+dbs <- listEnrichrDbs()
+
+# down reg
+down_reg = rownames(row_anno)[row_anno$direction == "Down"]
+
+ens2gene <- read.table("/data/TCGA-PRAD/mrna/0007888f-8d96-4c01-8251-7fef6cc71596/88215dd0-5841-44f1-9393-eefd8238cbb3.rna_seq.augmented_star_gene_counts.tsv", sep="\t", header=T)
+ens2gene = ens2gene[,c(1,2)]
+ens2gene = subset(ens2gene, ens2gene$gene_id %in% down_reg)
+
+enriched <- enrichr(genes = ens2gene$gene_name, databases = "KEGG_2021_Human")
+res = enriched$KEGG_2021_Human
+res_a = subset(res, res$P.value < 0.05)
+```
+
+
+
+################################################################
+##############################################################
+############################################################
+
+
+# cluster B
+
+```{R}
+mrna_vst <- as.matrix(read.table("/data/TCGA-PRAD/mimQTLs/mrna_vst.txt", header=T, sep="\t"))
+colnames(mrna_vst) = gsub("\\.", "-", colnames(mrna_vst))
+mirna_vst <- as.matrix(read.table("/data/TCGA-PRAD/mimQTLs/mirna_vst.txt", header=T, sep="\t"))
+colnames(mirna_vst) <- gsub("\\.", "-", colnames(mirna_vst))
+```
+
+# subset
+```{R}
+# mirna
+clusters = read.table("/data/TCGA-PRAD/mimQTLs/miRNA_clusters.txt", header=T, sep="\t")
+b = rownames(subset(clusters, clusters$x == "2"))
+mirna_vst = mirna_vst[b,]
+
+#mrna
+deg = read.table("/data/TCGA-PRAD/mrna_res/deg_deseq2.txt", sep="\t", header=T)
+mrna_vst <- mrna_vst[rownames(deg),]
+
+# match
+samps <- intersect(colnames(mirna_vst), colnames(mrna_vst))
+mrna_vst <- mrna_vst[,samps]
+mirna_vst <- mirna_vst[,samps]
+all(colnames(mrna_vst)==colnames(mirna_vst))
+```
+
+
+# Hieracrchical Clustering (A)
+
+```{R}
+tab <- read.table("/data/TCGA-PRAD/miRNA_cluster/cluster_B_tab.txt")
+colnames(tab) = gsub("\\.", "-", colnames(tab))
+deg <- read.table("/data/TCGA-PRAD/mrna_res/deg_deseq2.txt", header=T, sep="\t")
+dem <- read.table("/data/TCGA-PRAD/mirna_res/de_mirs.txt", header=T, sep="\t")
+sig.tab = read.table("/data/TCGA-PRAD/miRNA_cluster/cluster_B_sig.tab.txt", header=T, sep="\t")
+sig.tab <- subset(sig.tab, sig.tab$Spearman_cor > 0.4 | sig.tab$Spearman_cor < -0.4)
+sig_mirs_b <- unique(sig.tab$miRNA)
+sig_gene_b <- unique(sig.tab$Gene)
+
+# subset tab to have signif strong corr
+tab <- tab[sig_gene_b,]
+tab <- tab[,sig_mirs_b]
+```
+
+```{R}
+col_anno <- subset(dem, dem$mirbase_id %in% colnames(tab))
+col_anno$direction <- ifelse(col_anno$log2FoldChange > 0, "Up", "Down")
+col_anno <- col_anno[!duplicated(col_anno$mirbase_id),]
+annot_col <- data.frame(row.names = col_anno$mirbase_id, Direction = factor(col_anno$direction))
+
+cols <- c("red", "blue")
+names(cols) <- c("Up", "Down")
+annot_colors <- list(Direction = cols)
+
+row_anno <- subset(deg, rownames(deg) %in% rownames(tab))
+row_anno$direction <- ifelse(row_anno$log2FoldChange > 0, "Up", "Down")
+annot_row <- data.frame(row.names = rownames(row_anno), Direction = factor(row_anno$direction))
+
+
+pheatmap::pheatmap(tab, clustering_distance_rows = "correlation", 
+                   clustering_distance_cols = "correlation",
+                   clustering_method = "average",
+                   annotation_colors = annot_colors,
+                   annotation_row = annot_row,
+                   annotation_col = annot_col,
+                   col = hcl.colors(200, "Purple-Green",rev=F),
+                   show_rownames=F,
+                   show_colnames=T)
+```
+
+# Enrich R
+
+```{R}
+library(enrichR)
+
+setEnrichrSite("Enrichr")
+dbs <- listEnrichrDbs()
+
+# up reg genes
+up_reg = rownames(row_anno)[row_anno$direction == "Up"]
+
+ens2gene <- read.table("/data/TCGA-PRAD/mrna/0007888f-8d96-4c01-8251-7fef6cc71596/88215dd0-5841-44f1-9393-eefd8238cbb3.rna_seq.augmented_star_gene_counts.tsv", sep="\t", header=T)
+ens2gene = ens2gene[,c(1,2)]
+ens2gene = subset(ens2gene, ens2gene$gene_id %in% up_reg)
+
+enriched <- enrichr(genes = ens2gene$gene_name, databases = "KEGG_2021_Human")
+res = enriched$KEGG_2021_Human
+res_b = subset(res, res$P.value < 0.05)
+```

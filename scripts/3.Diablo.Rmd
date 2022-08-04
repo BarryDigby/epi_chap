@@ -1,0 +1,338 @@
+---
+title: "diablo"
+author: "Barry"
+date: '2022-06-18'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+mir_meta = read.table("/data/TCGA-PRAD/mirna_matched/mirna_meta.txt", sep="\t", header=T)
+mrna_meta = read.table("/data/TCGA-PRAD/mrna_matched/mrna_meta.txt", sep="\t", header=T)
+met_meta = read.table("/data/TCGA-PRAD/methylation_matched/methylation_meta.txt", sep="\t", header=T)
+
+gene = mrna_meta$Sample.ID
+mirna = mir_meta$Sample.ID
+cpg = met_meta$Sample_ID
+
+setdiff(gene,mirna) # no diff so its cpg we need to pop
+
+met_meta <- subset(met_meta, met_meta$Sample_ID %in% gene)
+mrna_meta = subset(mrna_meta, mrna_meta$Sample.ID %in% met_meta$Sample_ID)
+mir_meta = subset(mir_meta, mir_meta$Sample.ID %in% met_meta$Sample_ID)
+
+sub_cpg = met_meta$Sample_ID
+sub_gene = mrna_meta$Sample.ID
+sub_mir = mir_meta$Sample.ID
+rm( cpg, gene, mirna )
+```
+
+# functions
+
+```{R}
+remove_var_nfeat <- function(mat, nfeat){
+  require(resample)
+  mat <- as.matrix(t(mat))
+  vars <- colVars(mat)
+  varorder <- order(vars, decreasing=T)
+  keep <- head(varorder, max(1, nfeat))
+  mat <- as.matrix(mat[,keep,drop=FALSE])
+  mat <- as.matrix(t(mat))
+  return(mat)
+}
+
+remove_var_perc <- function(mat, var){
+  require(resample)
+  mat <- as.matrix(t(mat))
+  vars <- colVars(mat)
+  varorder <- order(vars, decreasing=T)
+  keep <- head(varorder, max(1, ncol(mat)*(1-var)))
+  mat <- as.matrix(mat[,keep,drop=FALSE])
+  mat <- as.matrix(t(mat))
+  return(mat)
+}
+```
+
+
+```{R}
+genes = read.table("/data/TCGA-PRAD/mrna_matched/mrna_vst.txt", sep="\t", header=T)
+colnames(genes) = gsub("\\.", "-", colnames(genes))
+genes = genes[,sub_mir]
+
+#genes = remove_var_nfeat(genes, 2000) 
+#dim(genes)
+
+# use deG instead
+deg = read.table("/data/TCGA-PRAD/mrna_res/deg_deseq2.txt", header=T, sep="\t") #padj > 0.05 & LFC 1
+
+key = rownames(deg)
+
+genes = genes[key,]
+
+anno = read.table("/data/TCGA-PRAD/mrna/0007888f-8d96-4c01-8251-7fef6cc71596/88215dd0-5841-44f1-9393-eefd8238cbb3.rna_seq.augmented_star_gene_counts.tsv", header=T, sep="\t")
+anno = subset(anno, anno$gene_type == "protein_coding")
+anno <- anno[,c(1,2)]
+anno <- anno[match(rownames(genes), anno$gene_id),]
+rownames(genes) = anno$gene_name
+genes = as.matrix(genes)
+```
+
+```{R}
+mirna = read.table("/data/TCGA-PRAD/mirna_matched/mirna_vst.txt", sep="\t", header=T)
+colnames(mirna) = gsub("\\.", "-", colnames(mirna))
+mirna = as.matrix(mirna[,sub_mir])
+
+#mirna = remove_var_nfeat(mirna, 500)
+#dim(mirna)
+
+dem = read.table("/data/TCGA-PRAD/mirna_matched/de_mirs.txt", sep="\t", header=T)
+
+mirna = mirna[rownames(dem),]
+```
+
+```{R}
+mVals = read.table("/data/TCGA-PRAD/methylation_matched/mVals.txt", sep="\t", header=T)
+colnames(mVals) = gsub("\\.", "-", colnames(mVals))
+mVals <- as.matrix(mVals[,sub_mir])
+
+#mVals = remove_var_nfeat(mVals, 2000)
+#dim(mVals)
+
+dmp = read.table("/data/TCGA-PRAD/methylation_matched/dmp_filt.txt", header=T, sep="\t")
+up = subset(dmp, dmp$logFC > 2)
+down = subset(dmp, dmp$logFC < -2)
+dmp = rbind(up, down)
+# if does not overlap a gene..
+dmp =  dmp[!(is.na(dmp$UCSC_RefGene_Name) | dmp$UCSC_RefGene_Name==""), ]
+
+mVals <- mVals[rownames(dmp),]
+```
+
+
+# Train / Test
+
+```{R}
+set.seed(12553)
+mVals = mVals[!is.infinite(rowSums(mVals)),] # remove rows with INF so remove probe not sample
+mVals = t(mVals) 
+split <- sample(c(rep(0, 0.7 * nrow(mVals)), rep(1, 0.3 * nrow(mVals))))
+mVals_test = mVals[split==1,]
+mVals_train = mVals[split==0,]
+
+genes = t(genes)
+genes_test = genes[split==1,]
+genes_train = genes[split==0,]
+
+mirna = t(mirna)
+mirna_test = mirna[split==1,]
+mirna_train = mirna[split==0,]
+
+test_meta = subset(mir_meta, rownames(mir_meta) %in% rownames(mVals_test))
+train_meta = subset(mir_meta, rownames(mir_meta) %in% rownames(mVals_train))
+
+## sanity
+table(test_meta$Sample.Type)
+table(train_meta$Sample.Type)
+
+all(rownames(mVals_train) == rownames(genes_train))
+all(rownames(mVals_train) == rownames(mirna_train))
+
+all(rownames(mVals_test) == rownames(genes_test))
+all(rownames(mVals_test) == rownames(mirna_test))
+
+
+all(is.finite(mVals))
+all(is.finite(genes))
+all(is.finite(mirna))
+```
+
+
+# mixomics TRAIN
+
+```{R, fig.height=8.2, fig.width=8}
+library(mixOmics)
+X = list(mRNA = genes_train, miRNA = mirna_train, CpG = mVals_train)
+Y = train_meta$Sample.Type
+
+# 0.1 = predictive // 1 = correlated
+design <- matrix(0.1, ncol = length(X), nrow = length(X),
+dimnames = list(names(X), names(X)))
+diag(design) <- 0
+design
+
+diablo.tcga <- block.plsda(X, Y, ncomp = 10, design = design, scale=T)
+set.seed(123) # For reproducibility, remove for your analyses
+perf.diablo.tcga = perf(diablo.tcga, validation = 'Mfold', folds = 5, nrepeat = 20, auc = T, progressBar = T)
+#perf.diablo.tcga$error.rate
+# Lists the different types of error rates
+# Plot of the error rates based on weighted vote
+png("/data/TCGA-PRAD/diablo_plots/perf.diablo.tcga.png", width = 500, height = 460, units = "px")
+plot(perf.diablo.tcga)
+dev.off()
+
+perf.diablo.tcga$choice.ncomp$WeightedVote
+
+perf.diablo.tcga$choice.ncomp$WeightedVote["Overall.BER", "centroids.dist"]
+```
+
+
+```{R}
+set.seed(123) # For reproducibility with this handbook, remove otherwise
+test.keepX <- list(mRNA = c(seq(5,50,5), 100),
+                   miRNA = c(seq(5,55,5)),
+                   CpG = c(seq(5,50,5), 100))
+
+
+#BPPARAM <- BiocParallel::MulticoreParam(workers = parallel::detectCores()-4)
+tune.diablo.tcga <- tune.block.splsda(X, Y, ncomp = 4,
+                                      test.keepX = test.keepX, design = design,
+                                      validation = 'Mfold', folds = 3, nrepeat = 5,
+                                      dist = "max.dist", progressBar = TRUE)
+
+
+list.keepX = tune.diablo.tcga$choice.keepX
+```
+
+
+```{R}
+diablo.tcga <- block.splsda(X, Y, ncomp = 4,
+                            keepX = list.keepX, design = design)
+
+
+selectVar(diablo.tcga, block = 'mRNA', comp = 1)
+
+mrna_comp1 = selectVar(diablo.tcga, comp=1, block="mRNA")
+mrna_comp1 = mrna_comp1$mRNA$name
+
+mirna_comp1 = selectVar(diablo.tcga, comp=1, block="miRNA")
+mirna_comp1 = mirna_comp1$miRNA$name
+
+cpg_sigs = c()
+component = c()
+for(i in 1:4){
+  cpg_comp1 = selectVar(diablo.tcga, comp=i, block="CpG")
+  cpg_comp1 = cpg_comp1$CpG$name
+  cpg_sigs = c(cpg_sigs, cpg_comp1)
+  comp = rep(i, length(cpg_comp1))
+  component = c(component, comp)
+}
+
+methyl_comp = subset(dmp, rownames(dmp) %in% cpg_sigs)
+methyl_comp$comp = component
+
+plotDiablo(diablo.tcga, ncomp=4)
+
+png("/data/TCGA-PRAD/diablo_plots/plotindiv.png", width=700, height = 600, units = "px")
+plotIndiv(diablo.tcga, ind.names = F, legend = T, title = "TCGA-PRAD Components 1-2", size.title = 14,
+          ellipse = F, star = F)
+dev.off()
+
+
+plotArrow(diablo.tcga, ind.names = FALSE, legend = TRUE,title = 'TCGA, DIABLO comp 1 - 2')
+```
+
+
+```{R}
+plotVar(diablo.tcga, var.names = FALSE, style = 'graphics', legend = TRUE,
+pch = c(16, 17, 15), cex = c(2,2,2), cutoff = 0.1,
+col = c('darkorchid', 'brown1', 'lightgreen'),
+title = "TCGA-PRAD")
+
+png("~/Desktop/mrna_contrib_1.png", width=500, height=500, units="px")
+plotLoadings(diablo.tcga, block = "mRNA", comp = 1, contrib = "max", ndisplay = 20)
+dev.off()
+```
+
+
+```{R}
+pdf("/data/TCGA-PRAD/diablo_plots/circos.pdf", width=10, height=10)
+#png("/data/TCGA-PRAD/diablo_plots/circos.png", width=600, height=600, units="px", res = 100)
+circosPlot(diablo.tcga, cutoff = 0.8, line = TRUE, comp = 1, blocks = c(1,2,3),
+color.blocks = c('darkorchid', "orange", 'lightgreen'), size.labels = 2, size.variables = 0.6,
+color.cor = c("red","blue"), showIntraLinks = F)
+dev.off()
+```
+
+
+```{R}
+pdf("/data/TCGA-PRAD/diablo_plots/cim_1.pdf", width=8, height=10)
+cimDiablo(diablo.tcga, color.blocks = c('darkorchid', 'brown1', 'lightgreen'), comp = 1, margin=c(8,20), legend.position = "right", transpose = T)
+dev.off()
+```
+
+
+```{R}
+# Opens a new window
+network(diablo.tcga, blocks = c(1,2, 3), show.edge.labels = T, show.color.key = T,
+cutoff = 0.9, shape.node = c("circle", "rectangle", "circle"), keysize = c(1,2), keysize.label = 0.2,
+color.node = c('darkorchid', 'lightgreen', "orange"), layout.fun = layout_on_grid,
+# To save the plot, comment out otherwise
+save = "pdf", name.save = "/data/TCGA-PRAD/diablo_plots/diablo-network")
+
+
+X11()
+x = network(diablo.tcga, cutoff = 0.9, blocks = c(2,3), layout.fun = layout_on_grid)
+while(names(dev.cur()) !='null device') Sys.sleep(1)
+```
+
+
+```{R}
+perf.diablo.tcga <- perf(diablo.tcga, validation = 'Mfold', folds = 5,
+nrepeat = 10, dist = 'max.dist')
+
+perf.diablo.tcga$MajorityVote.error.rate
+
+perf.diablo.tcga$WeightedVote.error.rate
+
+
+png("~/Desktop/ROC_mirna.png", width=500, height=500, units="px")
+auroc(diablo.tcga, roc.block = c("miRNA"), roc.comp = 1,
+print = F)
+dev.off()
+```
+
+# test data
+
+```{R}
+data.test.tcga <- list(mRNA = genes_test,
+miRNA = mirna_test, CpG = mVals_test)
+predict.diablo.tcga <- predict(diablo.tcga, newdata = data.test.tcga)
+
+auc.diablo.tcga <- auroc(predict.diablo.tcga, roc.block = c("miRNA", "mRNA", "CpG"), roc.comp = 1,print = F)
+
+confusion.mat.tcga <- get.confusion_matrix(truth = test_meta$Sample.Type,
+predicted = predict.diablo.tcga$WeightedVote$max.dist[,1])
+confusion.mat.tcga
+```
+
+# corr predictive CPGs and their genes
+```{R}
+gene_sub = read.table("~/Desktop/fooo.txt")
+gene_sub <- gene_sub$V1
+gene_sub <- gene_sub[-2]
+genes = read.table("/data/TCGA-PRAD/mrna_matched/mrna_vst.txt", sep="\t", header=T)
+colnames(genes) = gsub("\\.", "-", colnames(genes))
+
+anno = read.table("/data/TCGA-PRAD/mrna/0007888f-8d96-4c01-8251-7fef6cc71596/88215dd0-5841-44f1-9393-eefd8238cbb3.rna_seq.augmented_star_gene_counts.tsv", header=T, sep="\t")
+anno = subset(anno, anno$gene_type == "protein_coding")
+anno <- anno[,c(1,2)]
+anno <- anno[match(rownames(genes), anno$gene_id),]
+anno = subset(anno, anno$gene_name %in% gene_sub)
+
+genes = genes[anno$gene_id,sub_mir]
+rownames(genes) = anno$gene_name
+dim(genes)
+
+cpg_sub = rownames(methyl_comp1)
+mVals = read.table("/data/TCGA-PRAD/methylation_matched/mVals.txt", sep="\t", header=T)
+colnames(mVals) = gsub("\\.", "-", colnames(mVals))
+mVals <- mVals[cpg_sub,sub_mir]
+
+mVals <- as.data.frame(t(mVals))
+genes = as.data.frame(t(genes))
+mVals$stat = mir_meta$Sample.Type
+genes$stat = mir_meta$Sample.Type
+
+
+tmp_mat = data.frame(CpG = mVals[,colnames(mVals)[6]], Gene = genes[,"APOBEC3G"], Type = genes$stat)
+ggpubr::ggscatter(tmp_mat, x="CpG", y="Gene", facet.by = "Type", add = "reg.line", add.params = list(color="blue", fill = "lightgrey", linetype="solid", size=0.4), conf.int = T, cor.coef = T, cor.method = "spearman", size = 0.8, fullrange = T)
+```
